@@ -1,0 +1,11 @@
+# Mengabaikan folder sistem/cache
+.vscode/
+__pycache__/
+
+# Mengabaikan file Python yang tidak ingin diunggah
+app_2.py
+machine.py
+
+# Mengabaikan file Excel tertentu di dalam folder data
+data/Data_Gabungan_Lada_Cuaca_Full.xlsx
+data/Hasil_Clustering_Lada.xlsx
