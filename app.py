@@ -277,7 +277,6 @@ with tab1:
                     
             gdf_merged = prepare_map_data(df)
             
-        # Metric Cards
         col1, col2, col3, col4 = st.columns(4)
         with col1:
             st.markdown(f"""
@@ -327,6 +326,7 @@ with tab1:
                     locations=gdf_merged.index,
                     color='Klaster',
                     color_discrete_map=color_map,
+                    category_orders={"Klaster": ["Klaster 1", "Klaster 2", "Klaster 3", "Klaster 4", "Klaster 5"]},
                     hover_name=gdf_merged.index,
                     hover_data={
                         'Nama Wilayah': False, 
@@ -376,6 +376,8 @@ with tab1:
                 for trace in fig_map.data:
                     if trace.hovertemplate: 
                         trace.hovertemplate = trace.hovertemplate.replace('index=%{location}<br>', '')
+                    if trace.name == 'Tidak Ada Data':
+                        trace.showlegend = False
 
                 st.plotly_chart(fig_map, use_container_width=True)
             else:
@@ -411,7 +413,6 @@ with tab1:
 
         st.markdown("<hr style='margin-top: 15px; margin-bottom: 25px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
 
-        # Form Filter Control
         with st.form(key="clustering_form", border=True):
             st.markdown("<div style='font-weight: 700; font-size: 1.05rem; color: #0F172A;'>🎛️ Clustering Filter Control</div>", unsafe_allow_html=True)
             st.caption("Ubah indikator di bawah ini lalu klik 'Terapkan Filter' untuk mengkalibrasi ulang algoritma K-Means.")
@@ -455,7 +456,7 @@ with tab1:
                 st.rerun()
 
         # =====================================================================
-        # BAGIAN CLUSTER PROFILING (11 GAMBAR DITATA 4 BARIS)
+        #  CLUSTER PROFILING 
         # =====================================================================
         st.markdown("<hr style='margin-top: 30px; margin-bottom: 25px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
         st.markdown("<div class='section-title' style='font-size: 1.15rem;'>📊 Cluster Profiling (Analisis Tren Variabel 2010–2024)</div>", unsafe_allow_html=True)
@@ -463,7 +464,6 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 1. KATEGORI PERTANIAN (3 Kolom)
         st.markdown("##### 🌾 Komponen Pertanian")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -475,7 +475,6 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 2. INDIKATOR SUHU (3 Kolom: Max, Min, Avg)
         st.markdown("##### 🌡️ Indikator Suhu Udara")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -487,7 +486,6 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 3. PRESIPITASI & KELEMBAPAN (3 Kolom)
         st.markdown("##### 💧 Presipitasi & Kelembapan")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -499,7 +497,6 @@ with tab1:
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # 4. KECEPATAN ANGIN (Hanya diisi 2 Kolom, kolom 3 dibiarkan kosong agar ukuran gambar sama persis)
         st.markdown("##### 🌪️ Indikator Kecepatan Angin")
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -511,7 +508,7 @@ with tab1:
         st.error(f"⚠️ File dataset `{FILE_DATASET}` tidak ditemukan. Pastikan lokasi file di folder `data/` sudah benar.")
 
 # ========================================================
-# TAB 2: PANEL REGRESSION (INTERAKTIF & DINAMIS)
+# TAB 2: PANEL REGRESSION 
 # ========================================================
 with tab2:
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
@@ -566,7 +563,6 @@ with tab2:
                     ]
                 )
 
-        # 2. MENCARI HASIL SPESIFIK BERDASARKAN FILTER
         selected_result = df_display[(df_display['Dependent Var.'] == dep_var) & (df_display['Independent Var.'] == ind_var)]
         
         if not selected_result.empty:
