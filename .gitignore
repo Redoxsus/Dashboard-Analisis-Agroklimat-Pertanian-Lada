@@ -5,7 +5,13 @@ __pycache__/
 # Mengabaikan file Python yang tidak ingin diunggah
 app_2.py
 machine.py
+app_explore.py
+machineback_explore.py
+test.py
 
 # Mengabaikan file Excel tertentu di dalam folder data
 data/Data_Gabungan_Lada_Cuaca_Full.xlsx
 data/Hasil_Clustering_Lada.xlsx
+data/Data_Gabungan_Lada_Cuaca_Full_Used_backup.xlsx
+data/Data_Gabungan_Lada_Cuaca_Full_Used_2024.xlsx
+data/Data_Gabungan_Lada_Cuaca_Full_Updated.xlsx

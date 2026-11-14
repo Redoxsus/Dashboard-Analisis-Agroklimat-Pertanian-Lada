@@ -3,8 +3,12 @@ import pandas as pd
 import geopandas as gpd
 import difflib
 import plotly.express as px
-from machineback import running
+from machineback import running, status_tahun 
 import warnings
+import time
+import datetime
+import shutil
+
 
 st.set_page_config(
     page_title="Dashboard Analisis Agroklimat Lada", 
@@ -178,8 +182,8 @@ def prepare_map_data(df):
     
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        gdf['lat'] = gdf.geometry.centroid.y
-        gdf['lon'] = gdf.geometry.centroid.x
+        gdf['shp_lat'] = gdf.geometry.centroid.y
+        gdf['shp_lon'] = gdf.geometry.centroid.x
 
     df_map = df.copy()
     df_map['Nama_Clean'] = df_map['Nama Wilayah'].astype(str)
@@ -200,23 +204,132 @@ def prepare_map_data(df):
         if nama_excel in kamus_manual: return kamus_manual[nama_excel]
         if nama_excel in gadm_names: return nama_excel
         kemiripan = difflib.get_close_matches(nama_excel, gadm_names, n=1, cutoff=0.7)
-        return kemiripan[0] if kemiripan else nama_excel
+        return kemiripan[0] if kemiripan else None
         
     df_map['Nama_Matched'] = df_map['Nama_Clean'].apply(auto_match_nama)
+
     gdf_merged = gdf.merge(df_map, left_on='NAME_2', right_on='Nama_Matched', how='left')
     gdf_merged['Klaster'] = gdf_merged['Klaster'].fillna('Tidak Ada Data')
+    
+    gdf_merged = gdf_merged.drop_duplicates(subset=['NAME_2'])
+    
+    lat_col = 'Latitude' if 'Latitude' in gdf_merged.columns else ('Lat' if 'Lat' in gdf_merged.columns else 'shp_lat')
+    lon_col = 'Longitude' if 'Longitude' in gdf_merged.columns else ('Lon' if 'Lon' in gdf_merged.columns else 'shp_lon')
+    
+    gdf_merged['lat'] = gdf_merged[lat_col]
+    gdf_merged['lon'] = gdf_merged[lon_col]
     
     gdf_merged['geometry'] = gdf_merged['geometry'].simplify(tolerance=0.01, preserve_topology=True)
     gdf_merged = gdf_merged.set_index('NAME_2')
     gdf_merged.index.name = 'Nama Wilayah'
     return gdf_merged
 
-@st.cache_data
-def load_panel_data(path):
+
+def generate_dynamic_profiling(df_data, selected_vars, k_num):
+    if df_data is None or df_data.empty or not selected_vars:
+        return {}
+        
+    rata_cols = []
+    for var in selected_vars:
+        rata_col = f'Rata-rata {var}'
+        if rata_col not in df_data.columns:
+            matched_cols = [c for c in df_data.columns if var in c and c != rata_col and c not in ['Kode', 'Nama Wilayah', 'Klaster']]
+            if matched_cols:
+                df_data[rata_col] = df_data[matched_cols].mean(axis=1)
+            else:
+                df_data[rata_col] = 0.0
+        rata_cols.append(rata_col)
+
     try:
-        return pd.read_excel(path, sheet_name='Data Panel')
+        profile_df = df_data.groupby('Klaster', observed=False)[rata_cols].mean()
     except Exception:
-        return pd.DataFrame()
+        return {}
+
+    agri_keywords = ['Produksi', 'Luas Panen', 'Produktivitas']
+    narratives = {}
+    
+    for klaster in profile_df.index:
+        agri_status = []
+        iklim_tertinggi = []
+        iklim_terendah = []
+        iklim_menengah = []
+        
+        is_lahan_rendah = False
+        is_cuaca_mendukung = False
+        
+        for var, rata_col in zip(selected_vars, rata_cols):
+            val = profile_df.loc[klaster, rata_col]
+            all_vals = profile_df[rata_col]
+            
+            is_agri = any(k in var for k in agri_keywords)
+            clean_var = var.split(' (')[0].strip()
+            
+            if k_num > 1:
+                max_val = all_vals.max()
+                min_val = all_vals.min()
+                
+                if val == max_val:
+                    if is_agri: 
+                        agri_status.append(1)
+                    else: 
+                        iklim_tertinggi.append(clean_var)
+                        if 'Hujan' in clean_var or 'Kelembapan' in clean_var:
+                            is_cuaca_mendukung = True
+                elif val == min_val:
+                    if is_agri: 
+                        agri_status.append(-1)
+                        if 'Luas Panen' in clean_var:
+                            is_lahan_rendah = True
+                    else: 
+                        iklim_terendah.append(clean_var)
+                else:
+                    if is_agri: 
+                        agri_status.append(0)
+                    else:
+                        iklim_menengah.append(clean_var)
+                    
+        agri_text = ""
+        if len(agri_status) > 0:
+            avg_agri = sum(agri_status) / len(agri_status)
+            if avg_agri > 0.3:
+                agri_text = "<b>Wilayah Sentra Produksi Utama</b>"
+            elif avg_agri < -0.3:
+                agri_text = "<b>Wilayah Potensi Pertanian Rendah</b>"
+            else:
+                agri_text = "<b>Wilayah Kapasitas Produksi Menengah</b>"
+                
+        iklim_text_parts = []
+        if iklim_tertinggi:
+            iklim_text_parts.append(f"{', '.join(iklim_tertinggi)} <span style='color:#DC2626; font-weight:600;'>Tertinggi</span>")
+        if iklim_terendah:
+            iklim_text_parts.append(f"{', '.join(iklim_terendah)} <span style='color:#059669; font-weight:600;'>Terendah</span>")
+        if iklim_menengah and not iklim_tertinggi and not iklim_terendah:
+             iklim_text_parts.append(f"kondisi iklim yang <span style='color:#D97706; font-weight:600;'>relatif stabil/menengah</span>")
+             
+        iklim_text = ""
+        if iklim_text_parts:
+            if "kondisi iklim" in iklim_text_parts[0]:
+                iklim_text = iklim_text_parts[0]
+            else:
+                iklim_text = "memiliki tingkat " + " dan ".join(iklim_text_parts)
+            
+        insight_text = ""
+        if is_lahan_rendah and is_cuaca_mendukung:
+            insight_text = " 💡 <i>Meskipun didukung agroklimat yang ideal, produksi belum optimal diduga akibat keterbatasan luas lahan panen.</i>"
+            
+        if agri_text and iklim_text:
+            final_text = f"{agri_text} yang {iklim_text}.{insight_text}"
+        elif agri_text:
+            final_text = f"Merupakan {agri_text} dibandingkan klaster lainnya.{insight_text}"
+        elif iklim_text:
+            final_text = f"Wilayah yang {iklim_text} (untuk indikator yang dipilih)."
+        else:
+            final_text = "Karakteristik wilayah berada pada tingkat <b>Menengah</b> secara keseluruhan."
+            
+        narratives[klaster] = final_text
+        
+    return narratives
+
 
 FILE_DATASET = "data/Data_Gabungan_Lada_Cuaca_Full_Used.xlsx"
 color_map = {
@@ -235,7 +348,7 @@ available_options = [
     'Produksi (ton)', 'Produktivitas (kg/ha)'
 ]
 
-df, cluster_metrics, reg_data, gdf_merged = None, None, None, None
+df, cluster_metrics, reg_data, fem_effects, gdf_merged = None, None, None, None, None
 
 st.markdown("""
     <div style="margin-bottom: 1.2rem;">
@@ -244,11 +357,10 @@ st.markdown("""
     </div>
 """, unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["📍 Clustering Analysis", "📈 Panel Regression", "ℹ️ About Dataset"])
+tab1, tab2, tab3, tab4 = st.tabs(["📍 Clustering Analysis", "📈 Panel Regression", "ℹ️ About Dataset", "⚙️ Data Management"])
 
-# ========================================================
 # TAB 1: CLUSTERING
-# ========================================================
+
 with tab1:
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
     
@@ -262,7 +374,11 @@ with tab1:
 
     try:
         with st.spinner('Memuat Data & Memproses Model Clustering...'):
-            df, cluster_metrics, reg_data = running(FILE_DATASET, selected_cluster_features=curr_vars, k_clusters=curr_k)
+            df, cluster_metrics, reg_data, fem_effects = running(
+                FILE_DATASET, 
+                selected_cluster_features=curr_vars, 
+                k_clusters=curr_k
+            )
             
             map_display_vars = [
                 'Luas Panen (ha)', 'Produksi (ton)', 'Produktivitas (kg/ha)', 
@@ -313,11 +429,17 @@ with tab1:
             
         st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
 
+        if cluster_metrics and 'periode' in cluster_metrics:
+            p_data = cluster_metrics['periode']
+            tahun_invalid = p_data.get('tahun_dilewati', [])
+            if tahun_invalid:
+                invalid_str = ", ".join([str(t[0]) for t in tahun_invalid])
+
         col_map, col_stats = st.columns([2.6, 1.1])
 
         with col_map:
-            st.markdown("<div class='section-title'>VISUALISASI PETA KLASTER WILAYAH</div>", unsafe_allow_html=True)
-            st.caption(f"Pemetaan K-Means berdasarkan {len(curr_vars)} indikator agroklimat & produksi terpilih.")
+            st.markdown("<div class='section-title'>VISUALISASI PETA KLASTER (AREA)</div>", unsafe_allow_html=True)
+            st.caption(f"Peta Choropleth K-Means berdasarkan indikator agroklimat & produksi terpilih.")
             
             if gdf_merged is not None:
                 fig_map = px.choropleth(
@@ -380,21 +502,66 @@ with tab1:
                         trace.showlegend = False
 
                 st.plotly_chart(fig_map, use_container_width=True)
+                
+                lat_col_name = 'Latitude' if 'Latitude' in df.columns else ('Lat' if 'Lat' in df.columns else None)
+                lon_col_name = 'Longitude' if 'Longitude' in df.columns else ('Lon' if 'Lon' in df.columns else None)
+                
+                if lat_col_name and lon_col_name:
+                    st.markdown("<hr style='border-color: #E2E8F0; margin: 15px 0;'>", unsafe_allow_html=True)
+                    st.markdown("<div class='section-title'>VISUALISASI SEBARAN TITIK (BUBBLE MAP)</div>", unsafe_allow_html=True)
+                    
+                    bubble_size_var = None
+                    if 'Produksi (ton)' in curr_vars: bubble_size_var = 'Rata-rata Produksi (ton)'
+                    elif 'Luas Panen (ha)' in curr_vars: bubble_size_var = 'Rata-rata Luas Panen (ha)'
+                    elif 'Produktivitas (kg/ha)' in curr_vars: bubble_size_var = 'Rata-rata Produktivitas (kg/ha)'
+                    
+                    if bubble_size_var and (df[bubble_size_var].max() > 0):
+                        st.caption(f"Besaran titik merepresentasikan volume aktual dari **{bubble_size_var.replace('Rata-rata ', '')}**.")
+                        size_param = bubble_size_var
+                    else:
+                        st.caption("Peta titik kordinat riil dari file Excel (ukuran gelembung disamaratakan).")
+                        size_param = None
+                        
+                    fig_bubble = px.scatter_mapbox(
+                        df, 
+                        lat=lat_col_name, 
+                        lon=lon_col_name, 
+                        color="Klaster",
+                        size=size_param,
+                        size_max=35,
+                        color_discrete_map=color_map,
+                        hover_name="Nama Wilayah",
+                        zoom=3.8, 
+                        center={"lat": -2.0, "lon": 118.0},
+                        mapbox_style="carto-positron"
+                    )
+                    
+                    fig_bubble.update_layout(
+                        margin={"r":0,"t":10,"l":0,"b":0},
+                        height=480,
+                        legend=dict(title=None, orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
+                    st.plotly_chart(fig_bubble, use_container_width=True)
+                
             else:
                 st.error("⚠️ File shapefile `gadm41_IDN_2.shp` tidak ditemukan di folder `data/`.")
 
         with col_stats:
-            st.markdown("<div class='section-title'>DISTRIBUSI DATA CLUSTER</div>", unsafe_allow_html=True)
-            st.caption("Proporsi anggota wilayah per klaster.")
+            st.markdown("<div class='section-title'>DISTRIBUSI & PROFIL KLASTER</div>", unsafe_allow_html=True)
+            st.caption("Karakteristik dinamis berdasarkan indikator yang dipilih.")
             
             cluster_list = [f"Klaster {i+1}" for i in range(curr_k)]
             cluster_colors = ['#E5734A', '#5D9CE2', '#47B376', '#9B51E0', '#F2994A']
+            
+            dynamic_profiles = generate_dynamic_profiling(df, curr_vars, curr_k)
             
             for idx, klaster in enumerate(cluster_list):
                 hex_color = cluster_colors[idx % len(cluster_colors)]
                 subset = df[df['Klaster'] == klaster]
                 count = len(subset)
                 pct = (count / len(df)) * 100 if len(df) > 0 else 0
+                
+                narasi = dynamic_profiles.get(klaster, "Data profil tidak tersedia.")
                 
                 st.markdown(f"""
                 <div class="cluster-card">
@@ -407,6 +574,9 @@ with tab1:
                     </div>
                     <div style="background-color: #F1F5F9; border-radius: 4px; height: 6px; width: 100%; margin-top: 8px; overflow: hidden;">
                         <div style="background-color: {hex_color}; height: 100%; width: {pct}%;"></div>
+                    </div>
+                    <div style="margin-top: 10px; font-size: 0.82rem; color: #334155; line-height: 1.5; padding-top: 8px; border-top: 1px dashed #E2E8F0;">
+                        {narasi}
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
@@ -455,61 +625,146 @@ with tab1:
                 st.session_state.k_num = input_k
                 st.rerun()
 
-        # =====================================================================
-        #  CLUSTER PROFILING 
-        # =====================================================================
+        # CLUSTER PROFILING
         st.markdown("<hr style='margin-top: 30px; margin-bottom: 25px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
-        st.markdown("<div class='section-title' style='font-size: 1.15rem;'>📊 Cluster Profiling (Analisis Tren Variabel 2010–2024)</div>", unsafe_allow_html=True)
-        st.caption("Visualisasi perbandingan tren historis rata-rata seluruh indikator penelitian antar klaster (2010–2024).")
-
+        st.markdown("<div class='section-title' style='font-size: 1.15rem;'>📊 Cluster Profiling (Analisis Tren Variabel)</div>", unsafe_allow_html=True)
+        st.caption("Visualisasi perbandingan tren historis rata-rata seluruh indikator penelitian antar klaster secara interaktif.")
         st.markdown("<br>", unsafe_allow_html=True)
+
+        def plot_dynamic_trend(df_data, variable_name, title, yaxis_label, satuan_x):
+            cols = [c for c in df_data.columns if variable_name in c]
+            if not cols:
+                return None
+            
+            df_grouped = df_data.groupby('Klaster', observed=False)[cols].mean().reset_index()
+            df_melted = df_grouped.melt(id_vars=['Klaster'], var_name='Tahun_Raw', value_name='Nilai')
+            df_melted['Tahun'] = df_melted['Tahun_Raw'].str.extract(r'(\d{4})')
+            df_melted = df_melted.dropna(subset=['Tahun'])
+            df_melted['Tahun'] = df_melted['Tahun'].astype(int)
+            df_melted = df_melted.sort_values('Tahun')
+            
+            fig = px.line(
+                df_melted, x='Tahun', y='Nilai', color='Klaster', markers=True,
+                color_discrete_map=color_map, title=title
+            )
+            fig.update_layout(
+                xaxis_title=f"Tahun<br><sup>({satuan_x})</sup>", 
+                yaxis_title=yaxis_label,
+                plot_bgcolor='#FFFFFF', 
+                paper_bgcolor='rgba(0,0,0,0)',
+                margin=dict(l=10, r=10, t=40, b=20),
+                xaxis=dict(showgrid=True, gridcolor='#F1F5F9', dtick=1),
+                yaxis=dict(showgrid=True, gridcolor='#F1F5F9'),
+                legend_title_text=''
+            )
+            return fig
 
         st.markdown("##### 🌾 Komponen Pertanian")
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.image("CLUSTER PROFILING/Produksi.png", caption="Tren Produksi (Ton)", use_container_width=True)
+            fig_prod = plot_dynamic_trend(df, "Produksi (ton)", "Tren Produksi", "Produksi (ton)", "ton")
+            if fig_prod: st.plotly_chart(fig_prod, use_container_width=True)
         with c2:
-            st.image("CLUSTER PROFILING/Luas Panen.png", caption="Tren Luas Panen (Ha)", use_container_width=True)
+            fig_luas = plot_dynamic_trend(df, "Luas Panen (ha)", "Tren Luas Panen", "Luas Panen (ha)", "ha")
+            if fig_luas: st.plotly_chart(fig_luas, use_container_width=True)
         with c3:
-            st.image("CLUSTER PROFILING/Produktivitas.png", caption="Tren Produktivitas (Kg/Ha)", use_container_width=True)
+            fig_prodv = plot_dynamic_trend(df, "Produktivitas (kg/ha)", "Tren Produktivitas", "Produktivitas (kg/ha)", "kg/ha")
+            if fig_prodv: st.plotly_chart(fig_prodv, use_container_width=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         st.markdown("##### 🌡️ Indikator Suhu Udara")
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.image("CLUSTER PROFILING/Suhu Maksimum.png", caption="Tren Suhu Maksimum (°C)", use_container_width=True)
+            fig_tmax = plot_dynamic_trend(df, "Suhu Maksimum", "Tren Suhu Maksimum", "Suhu Maksimum (°C)", "°C")
+            if fig_tmax: st.plotly_chart(fig_tmax, use_container_width=True)
         with c2:
-            st.image("CLUSTER PROFILING/Suhu Minimum.png", caption="Tren Suhu Minimum (°C)", use_container_width=True)
+            fig_tmin = plot_dynamic_trend(df, "Suhu Minimum", "Tren Suhu Minimum", "Suhu Minimum (°C)", "°C")
+            if fig_tmin: st.plotly_chart(fig_tmin, use_container_width=True)
         with c3:
-            st.image("CLUSTER PROFILING/Suhu Rata - rata.png", caption="Tren Suhu Rata-rata (°C)", use_container_width=True)
+            fig_tavg = plot_dynamic_trend(df, "Suhu Rata-rata", "Tren Suhu Rata-rata", "Suhu Rata-rata (°C)", "°C")
+            if fig_tavg: st.plotly_chart(fig_tavg, use_container_width=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         st.markdown("##### 💧 Presipitasi & Kelembapan")
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.image("CLUSTER PROFILING/Curah Hujan Total.png", caption="Tren Curah Hujan Total (mm)", use_container_width=True)
+            fig_rain = plot_dynamic_trend(df, "Curah Hujan Total", "Tren Curah Hujan", "Curah Hujan Total (mm)", "mm")
+            if fig_rain: st.plotly_chart(fig_rain, use_container_width=True)
         with c2:
-            st.image("CLUSTER PROFILING/Kelembapan Rata - rata.png", caption="Tren Kelembapan Rata-rata (%)", use_container_width=True)
+            fig_rh = plot_dynamic_trend(df, "Kelembapan", "Tren Kelembapan", "Kelembapan Rata-rata (%)", "%")
+            if fig_rh: st.plotly_chart(fig_rh, use_container_width=True)
         with c3:
-            st.image("CLUSTER PROFILING/Evapotranspirasi Total.png", caption="Tren Evapotranspirasi Total (mm)", use_container_width=True)
+            fig_et = plot_dynamic_trend(df, "Evapotranspirasi", "Tren Evapotranspirasi", "Evapotranspirasi Total (mm)", "mm")
+            if fig_et: st.plotly_chart(fig_et, use_container_width=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
 
         st.markdown("##### 🌪️ Indikator Kecepatan Angin")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, _ = st.columns([1, 1, 1])
         with c1:
-            st.image("CLUSTER PROFILING/Kecepatan Angin Rata - rata.png", caption="Tren Kecepatan Angin Rata-rata (m/s)", use_container_width=True)
+            fig_ws = plot_dynamic_trend(df, "Kecepatan Angin Rata-rata", "Tren Angin Rata-rata", "Kecepatan Angin Rata-rata (m/s)", "m/s")
+            if fig_ws: st.plotly_chart(fig_ws, use_container_width=True)
         with c2:
-            st.image("CLUSTER PROFILING/Kecepatan Angin Maksimum.png", caption="Tren Kecepatan Angin Maksimum (m/s)", use_container_width=True)
+            fig_ws_max = plot_dynamic_trend(df, "Kecepatan Angin Maksimum", "Tren Angin Maksimum", "Kecepatan Angin Maksimum (m/s)", "m/s")
+            if fig_ws_max: st.plotly_chart(fig_ws_max, use_container_width=True)
 
     except FileNotFoundError:
         st.error(f"⚠️ File dataset `{FILE_DATASET}` tidak ditemukan. Pastikan lokasi file di folder `data/` sudah benar.")
 
-# ========================================================
+
+SATUAN_DEP = {
+    'Produksi (ton)': 'ton',
+    'Luas Panen (ha)': 'hektare',
+    'Produktivitas (kg/ha)': 'kg/ha',
+}
+SATUAN_IND = {
+    'Curah Hujan Total (mm)': 'mm',
+    'Suhu Minimum (°C)': '°C',
+    'Suhu Maksimum (°C)': '°C',
+    'Suhu Rata-rata (°C)': '°C',
+    'Kelembapan Rata-rata (%)': '%',
+    'Kecepatan Angin Rata-rata': 'satuan',
+    'Kecepatan Angin Maksimum': 'satuan',
+    'Evapotranspirasi Total (mm)': 'mm',
+}
+
+def _fmt_angka(x):
+    x = abs(float(x))
+    if x != 0 and x < 0.0001:
+        return f"{x:.2e}"
+    return f"{x:,.4f}"
+
+def _nama_bersih(label):
+    return label.split(' (')[0].strip()
+
+def buat_narasi_koefisien(ind_var, dep_var, coef, pval):
+    try:
+        coef = float(coef)
+        pval = float(pval)
+    except (ValueError, TypeError):
+        return None
+
+    nama_ind = _nama_bersih(ind_var)
+    nama_dep = _nama_bersih(dep_var)
+    sat_ind = SATUAN_IND.get(ind_var, 'satuan')
+    sat_dep = SATUAN_DEP.get(dep_var, 'satuan')
+
+    if pval >= 0.05:
+        return (
+            f"Pengaruh {nama_ind} terhadap {nama_dep} tidak signifikan secara statistik, "
+            f"sehingga koefisien tidak dapat diinterpretasikan sebagai pengaruh nyata."
+        )
+
+    arah_kata = "meningkat" if coef > 0 else "menurun"
+    return (
+        f"Setiap kenaikan 1 {sat_ind} pada **{nama_ind}**, "
+        f"**{nama_dep}** rata-rata **{arah_kata} sekitar {_fmt_angka(coef)} {sat_dep}**."
+    )
+
 # TAB 2: PANEL REGRESSION 
-# ========================================================
+
 with tab2:
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
     st.markdown("<div class='section-title' style='font-size: 1.2rem;'>📈 Hasil Uji Regresi Data Panel</div>", unsafe_allow_html=True)
@@ -544,7 +799,6 @@ with tab2:
         ]
         df_display = df_display[cols]
         
-        # 1. BAGIAN FILTER INTERAKTIF
         with st.container(border=True):
             st.markdown("**🎛️ Pilih Kombinasi Variabel untuk Dianalisis:**")
             col_dep, col_ind = st.columns(2)
@@ -616,37 +870,49 @@ with tab2:
             </div>
             """, unsafe_allow_html=True)
 
-        df_panel = load_panel_data(FILE_DATASET)
-        if not df_panel.empty and ind_var in df_panel.columns and dep_var in df_panel.columns:
-            st.markdown(f"**Visualisasi Korelasi: {ind_var} vs {dep_var}**")
-            
-            df_plot = df_panel[(df_panel[ind_var] > 0) & (df_panel[dep_var] > 0)].copy()
-            df_plot['Var_Bin'] = pd.cut(df_plot[ind_var], bins=12)
-            df_binned = df_plot.groupby('Var_Bin', observed=False).agg({
-                ind_var: 'mean', dep_var: 'mean'
-            }).dropna().reset_index()
+            if model_terpilih == 'FE':
+                coef_raw, pval_raw = res['FE Coef'], res['FE p-Value']
+            else:
+                coef_raw, pval_raw = res['RE Coef'], res['RE p-Value']
 
-            fig_scatter = px.scatter(
-                df_binned, x=ind_var, y=dep_var, 
-                trendline="ols", template='plotly_white'
-            )
-            
-            fig_scatter.update_traces(
-                marker=dict(size=10, color='#3B82F6', line=dict(width=1, color='#1E40AF')),
-                line=dict(color='#1E293B', width=2.5)
-            )
-            
-            suffix = " mm" if "mm" in ind_var else " °C" if "°C" in ind_var else " %" if "%" in ind_var else ""
+            narasi = buat_narasi_koefisien(ind_var, dep_var, coef_raw, pval_raw)
+            if narasi:
+                st.markdown(f"**🧮 Interpretasi Koefisien:** {narasi}")
 
-            fig_scatter.update_layout(
-                plot_bgcolor='#FFFFFF', paper_bgcolor='rgba(0,0,0,0)',
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis=dict(showgrid=True, gridcolor='#F1F5F9', title=ind_var, ticksuffix=suffix),
-                yaxis=dict(showgrid=True, gridcolor='#F1F5F9', title=f"Rata-rata {dep_var}")
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+        if model_terpilih == 'FE':
+            key_efek = f"{ind_var}_vs_{dep_var}"
+            if fem_effects and key_efek in fem_effects:
+                st.markdown(f"""
+                **📍 Wilayah Spesifik yang Paling Terdampak / Memiliki Karakteristik Unik**<br>
+                <span style="font-size: 0.9rem; color: #475569;">
+                Karena model terpilih adalah <b>Fixed Effects Model (FEM)</b>, pengaruh variabel ini tidak merata dan sangat dipengaruhi oleh keunikan karakteristik tiap daerah. 
+                Berikut adalah daftar Kabupaten/Kota di Indonesia yang paling signifikan terpengaruh dan menjadi prioritas utama untuk penanganan kebijakan:
+                </span>
+                """, unsafe_allow_html=True)
+                
+                wilayah_list = fem_effects[key_efek]
+                df_wilayah_terpengaruh = pd.DataFrame({
+                    "No.": range(1, len(wilayah_list) + 1),
+                    "Kabupaten / Kota Prioritas": wilayah_list
+                })
+
+                st.dataframe(
+                    df_wilayah_terpengaruh,
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("ℹ️ Detail wilayah spesifik tidak tersedia untuk kombinasi variabel ini.")
         else:
-            st.warning("⚠️ Kombinasi variabel tidak ditemukan pada sheet data panel atau data tidak cukup.")
+            st.markdown(f"""
+            **🌍 Karakteristik Model Global (Random Effects)**<br>
+            <span style="font-size: 0.9rem; color: #475569;">
+            Karena model terpilih adalah <b>Random Effects Model (REM)</b>, variasi antar wilayah bersifat acak dan seragam secara nasional. 
+            Oleh karena itu, kebijakan mitigasi dapat diterapkan secara menyeluruh/agregat tanpa perlu mengkhususkan wilayah tertentu.
+            </span>
+            """, unsafe_allow_html=True)
 
         st.markdown("<div style='height: 15px;'></div>", unsafe_allow_html=True)
         with st.expander("📊 Lihat Tabel Lengkap Seluruh Kombinasi Uji Regresi"):
@@ -676,7 +942,6 @@ with tab2:
             
     else:
         st.info("⚠️ Data belum dimuat. Silakan periksa dataset Anda di Tab Clustering.")
-
 
 # ========================================================
 # TAB 3: ABOUT
@@ -716,7 +981,7 @@ with tab3:
         * **Kelembapan Rata-rata (%):** Tingkat kelembapan relatif tahunan.
         * **Curah Hujan Total (mm):** Akumulasi presipitasi tahunan.
         * **Evapotranspirasi Total (mm):** Total laju penguapan air tahunan.
-        * **Kecepatan Angin Maksimum & Rata-rata:** Vektor kecepatan angin rata-rata.
+        * **Kecepatan Angin Maksimum & Rata-rata (m/s):** Vektor kecepatan angin rata-rata.
         """)
     
     st.markdown("<hr style='margin-top: 20px; margin-bottom: 20px; border-color: #E2E8F0;'>", unsafe_allow_html=True)
@@ -739,3 +1004,171 @@ with tab3:
             st.caption(f"Menampilkan {len(df_raw_cluster)} baris data untuk Clustering.")
         else:
             st.warning(f"Sheet 'Cluster' tidak ditemukan di `{FILE_DATASET}`.")
+
+
+# TAB 4: DATA MANAGEMENT 
+with tab4:
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title' style='font-size: 1.2rem;'>⚙️ Data Management & Entry</div>", unsafe_allow_html=True)
+    st.caption("Input data pertanian baru. Sistem otomatis mengurutkan data berdasarkan wilayah dan memperbarui sheet Cluster.")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    try:
+        df_panel = pd.read_excel(FILE_DATASET, sheet_name='Data Panel')
+        df_cluster = pd.read_excel(FILE_DATASET, sheet_name='Cluster')
+        df_info = pd.read_excel(FILE_DATASET, sheet_name='Info Wilayah')
+        
+        daftar_wilayah = sorted(df_info['Nama Wilayah'].dropna().unique().tolist())
+    except Exception as e:
+        st.error(f"Gagal membaca dataset: {e}. Pastikan sheet 'Data Panel', 'Cluster', dan 'Info Wilayah' tersedia.")
+        daftar_wilayah = []
+        df_panel, df_cluster, df_info = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    with st.form("form_input_data", border=True):
+        st.markdown("#### 📝 Form Input / Update Data")
+        
+        pilih_wilayah = st.selectbox("📍 Pilih Wilayah (Kabupaten/Kota)", options=daftar_wilayah)
+        
+        tahun_default = int(df_panel['Tahun'].max() + 1) if ('Tahun' in df_panel.columns and not df_panel.empty) else 2025
+        pilih_tahun = st.number_input("📅 Tahun Data", min_value=2010, max_value=2030, value=tahun_default, step=1)
+        
+        st.markdown("---")
+        st.markdown("**🌱 Komponen Pertanian**")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            input_luas = st.number_input("Luas Panen (ha)", min_value=0.0, value=0.0, step=10.0)
+        with col_b:
+            input_produksi = st.number_input("Produksi (ton)", min_value=0.0, value=0.0, step=10.0)
+        with col_c:
+            input_produktivitas = st.number_input("Produktivitas (kg/ha)", min_value=0.0, value=0.0, step=10.0)
+        
+        st.markdown("---")
+        st.markdown("**☁️ Komponen Iklim**")
+        tarik_iklim = st.checkbox(
+            "Tarik & Timpa Data Iklim dari Open-Meteo", 
+            value=False,
+            help="Centang ini untuk menarik data suhu/hujan otomatis. Biarkan kosong jika hanya update data pertanian."
+        )
+        
+        submit_data = st.form_submit_button("💾 Simpan Data ke Dataset", type="primary", use_container_width=True)
+
+        if submit_data:
+            info_row = df_info[df_info['Nama Wilayah'] == pilih_wilayah]
+            
+            if info_row.empty:
+                st.error(f"Nama wilayah '{pilih_wilayah}' tidak ditemukan di sheet 'Info Wilayah'.")
+            else:
+                kode_wilayah = info_row['Kode'].values[0] if 'Kode' in info_row.columns else None
+                lat = info_row['Lat'].values[0] if 'Lat' in info_row.columns else None
+                lon = info_row['Lon'].values[0] if 'Lon' in info_row.columns else None
+                
+                if pd.isna(lat) or pd.isna(lon):
+                    st.error(f"Koordinat (Lat/Lon) untuk {pilih_wilayah} kosong di sheet 'Info Wilayah'.")
+                else:
+                    try:
+                        data_update_panel = {
+                            'Kode': kode_wilayah,
+                            'Nama Wilayah': pilih_wilayah,
+                            'Tahun': pilih_tahun,
+                            'Luas Panen (ha)': input_luas,
+                            'Produksi (ton)': input_produksi,
+                            'Produktivitas (kg/ha)': input_produktivitas,
+                            'Latitude': lat,
+                            'Longitude': lon
+                        }
+                        
+                        if tarik_iklim:
+                            with st.spinner(f"Menarik data iklim {pilih_wilayah} tahun {pilih_tahun} dari Open-Meteo..."):
+                                import datetime, requests
+                                today = datetime.date.today()
+                                end_date_str = f"{pilih_tahun}-12-31"
+                                if pilih_tahun >= today.year:
+                                    last_available_date = today - datetime.timedelta(days=5)
+                                    end_date_str = last_available_date.strftime("%Y-%m-%d")
+                                    
+                                start_date_str = f"{pilih_tahun}-01-01"
+
+                                url = (
+                                    f"https://archive-api.open-meteo.com/v1/archive?"
+                                    f"latitude={lat}&longitude={lon}&start_date={start_date_str}&end_date={end_date_str}"
+                                    f"&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+                                    f"precipitation_sum,rain_sum,et0_fao_evapotranspiration,wind_speed_10m_max,"
+                                    f"wind_speed_10m_mean&timezone=Asia%2FJakarta"
+                                )
+                                
+                                response = requests.get(url)
+                                data_cuaca = response.json()
+                                
+                                if "error" in data_cuaca:
+                                    st.error(f"Gagal menarik data API: {data_cuaca.get('reason')}")
+                                else:
+                                    daily = data_cuaca['daily']
+                                    
+                                    suhu_max = max((x for x in daily['temperature_2m_max'] if x is not None), default=0)
+                                    suhu_min = min((x for x in daily['temperature_2m_min'] if x is not None), default=0)
+                                    suhu_avg = sum(filter(None, daily['temperature_2m_mean'])) / len([x for x in daily['temperature_2m_mean'] if x is not None])
+                                    curah_hujan = sum(filter(None, daily['precipitation_sum']))
+                                    evapotranspirasi = sum(filter(None, daily['et0_fao_evapotranspiration']))
+                                    angin_max = max((x for x in daily['wind_speed_10m_max'] if x is not None), default=0)
+                                    angin_avg = sum(filter(None, daily['wind_speed_10m_mean'])) / len([x for x in daily['wind_speed_10m_mean'] if x is not None])
+                                    
+                                    data_update_panel.update({
+                                        'Suhu Maksimum (°C)': round(suhu_max, 2),
+                                        'Suhu Minimum (°C)': round(suhu_min, 2),
+                                        'Suhu Rata-rata (°C)': round(suhu_avg, 2),
+                                        'Curah Hujan Total (mm)': round(curah_hujan, 2),
+                                        'Evapotranspirasi Total (mm)': round(evapotranspirasi, 2),
+                                        'Kecepatan Angin Maksimum': round(angin_max, 2),
+                                        'Kecepatan Angin Rata-rata': round(angin_avg, 2),
+                                        'Kelembapan Rata-rata (%)': 80.0
+                                    })
+                        
+                        backup_path = FILE_DATASET.replace(".xlsx", "_backup.xlsx")
+                        shutil.copy2(FILE_DATASET, backup_path)
+
+                        if 'Nama Wilayah' in df_panel.columns and 'Tahun' in df_panel.columns:
+                            mask_panel = (df_panel['Nama Wilayah'] == pilih_wilayah) & (df_panel['Tahun'] == pilih_tahun)
+                        else:
+                            mask_panel = pd.Series([False] * len(df_panel))
+
+                        if mask_panel.any():
+                            idx = df_panel[mask_panel].index[0]
+                            for col, val in data_update_panel.items():
+                                df_panel.at[idx, col] = val
+                        else:
+                            df_panel = pd.concat([df_panel, pd.DataFrame([data_update_panel])], ignore_index=True)
+                        
+                        if 'Nama Wilayah' in df_cluster.columns and 'Tahun' in df_cluster.columns:
+                            mask_cluster = (df_cluster['Nama Wilayah'] == pilih_wilayah) & (df_cluster['Tahun'] == pilih_tahun)
+                        else:
+                            mask_cluster = pd.Series([False] * len(df_cluster))
+                            
+                        if not mask_cluster.any():
+                            data_update_cluster = {
+                                'Kode': kode_wilayah,
+                                'Nama Wilayah': pilih_wilayah,
+                                'Tahun': pilih_tahun
+                            }
+                            df_cluster = pd.concat([df_cluster, pd.DataFrame([data_update_cluster])], ignore_index=True)
+
+                        sort_cols_panel = [col for col in ['Kode', 'Tahun'] if col in df_panel.columns]
+                        if sort_cols_panel:
+                            df_panel = df_panel.sort_values(by=sort_cols_panel).reset_index(drop=True)
+                            
+                        sort_cols_cluster = [col for col in ['Kode', 'Tahun'] if col in df_cluster.columns]
+                        if sort_cols_cluster:
+                            df_cluster = df_cluster.sort_values(by=sort_cols_cluster).reset_index(drop=True)
+                        
+                        with pd.ExcelWriter(FILE_DATASET, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                            df_panel.to_excel(writer, sheet_name='Data Panel', index=False)
+                            df_cluster.to_excel(writer, sheet_name='Cluster', index=False)
+                        
+                        st.success(f"✅ Data {pilih_wilayah} tahun {pilih_tahun} berurut rapi dan berhasil disimpan!")
+                        
+                        import time
+                        st.cache_data.clear()
+                        time.sleep(1.5)
+                        st.rerun()
+
+                    except Exception as e:
+                        st.error(f"Terjadi kesalahan saat memproses/menyimpan data: {str(e)}")
