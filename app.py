@@ -3,7 +3,7 @@ import pandas as pd
 import geopandas as gpd
 import difflib
 import plotly.express as px
-from machineback import running, status_tahun 
+from machineback_explore import running, status_tahun 
 import warnings
 import time
 import datetime
@@ -1008,167 +1008,303 @@ with tab3:
 
 # TAB 4: DATA MANAGEMENT 
 with tab4:
+    import re
+    import requests
+
     st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-    st.markdown("<div class='section-title' style='font-size: 1.2rem;'>⚙️ Data Management & Entry</div>", unsafe_allow_html=True)
-    st.caption("Input data pertanian baru. Sistem otomatis mengurutkan data berdasarkan wilayah dan memperbarui sheet Cluster.")
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("<div class='section-title' style='font-size: 1.2rem;'>Menambahkan Data Baru ke dalam Dataset</div>", unsafe_allow_html=True)
+    st.caption("Kelola data produksi lada dan parameter iklim tahunan, atau unggah ulang dataset dasar untuk mengatur ulang seluruh data.")
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+    # Menampilkan notifikasi yang tersimpan setelah halaman melakukan rerun
+    if "tab4_notif" in st.session_state:
+        notif_type, notif_msg = st.session_state.pop("tab4_notif")
+        if notif_type == "success":
+            st.success(notif_msg)
+            st.toast(notif_msg)
+        else:
+            st.error(notif_msg)
+            st.toast(notif_msg)
 
     try:
         df_panel = pd.read_excel(FILE_DATASET, sheet_name='Data Panel')
         df_cluster = pd.read_excel(FILE_DATASET, sheet_name='Cluster')
         df_info = pd.read_excel(FILE_DATASET, sheet_name='Info Wilayah')
-        
         daftar_wilayah = sorted(df_info['Nama Wilayah'].dropna().unique().tolist())
     except Exception as e:
-        st.error(f"Gagal membaca dataset: {e}. Pastikan sheet 'Data Panel', 'Cluster', dan 'Info Wilayah' tersedia.")
+        st.error(f"Gagal memuat dataset: {e}. Pastikan sheet 'Data Panel', 'Cluster', dan 'Info Wilayah' tersedia.")
         daftar_wilayah = []
         df_panel, df_cluster, df_info = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    with st.form("form_input_data", border=True):
-        st.markdown("#### 📝 Form Input / Update Data")
-        
-        pilih_wilayah = st.selectbox("📍 Pilih Wilayah (Kabupaten/Kota)", options=daftar_wilayah)
-        
-        tahun_default = int(df_panel['Tahun'].max() + 1) if ('Tahun' in df_panel.columns and not df_panel.empty) else 2025
-        pilih_tahun = st.number_input("📅 Tahun Data", min_value=2010, max_value=2030, value=tahun_default, step=1)
-        
-        st.markdown("---")
-        st.markdown("**🌱 Komponen Pertanian**")
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            input_luas = st.number_input("Luas Panen (ha)", min_value=0.0, value=0.0, step=10.0)
-        with col_b:
-            input_produksi = st.number_input("Produksi (ton)", min_value=0.0, value=0.0, step=10.0)
-        with col_c:
-            input_produktivitas = st.number_input("Produktivitas (kg/ha)", min_value=0.0, value=0.0, step=10.0)
-        
-        st.markdown("---")
-        st.markdown("**☁️ Komponen Iklim**")
-        tarik_iklim = st.checkbox(
-            "Tarik & Timpa Data Iklim dari Open-Meteo", 
-            value=False,
-            help="Centang ini untuk menarik data suhu/hujan otomatis. Biarkan kosong jika hanya update data pertanian."
-        )
-        
-        submit_data = st.form_submit_button("💾 Simpan Data ke Dataset", type="primary", use_container_width=True)
+    col_main, col_side = st.columns([1.65, 1], gap="large")
 
-        if submit_data:
-            info_row = df_info[df_info['Nama Wilayah'] == pilih_wilayah]
-            
-            if info_row.empty:
-                st.error(f"Nama wilayah '{pilih_wilayah}' tidak ditemukan di sheet 'Info Wilayah'.")
+    with col_main:
+        with st.container(border=True):
+            st.markdown("<div style='font-weight: 700; font-size: 1rem; color: #0F172A; margin-bottom: 10px;'>Target Wilayah & Periode</div>", unsafe_allow_html=True)
+
+            c_wil, c_thn = st.columns([2, 1])
+            with c_wil:
+                pilih_wilayah = st.selectbox("Kabupaten / Kota", options=daftar_wilayah)
+            with c_thn:
+                tahun_default = int(df_panel['Tahun'].max()) if ('Tahun' in df_panel.columns and not df_panel.empty) else 2025
+                pilih_tahun = st.number_input("Tahun", min_value=2010, max_value=2030, value=tahun_default, step=1)
+
+            existing_row = pd.DataFrame()
+            if not df_panel.empty and 'Nama Wilayah' in df_panel.columns and 'Tahun' in df_panel.columns:
+                existing_row = df_panel[(df_panel['Nama Wilayah'] == pilih_wilayah) & (df_panel['Tahun'] == pilih_tahun)]
+
+            default_luas, default_prod, default_prodv = 0.0, 0.0, 0.0
+            if not existing_row.empty:
+                r0 = existing_row.iloc[0]
+                default_luas = float(r0['Luas Panen (ha)']) if pd.notna(r0.get('Luas Panen (ha)')) else 0.0
+                default_prod = float(r0['Produksi (ton)']) if pd.notna(r0.get('Produksi (ton)')) else 0.0
+                default_prodv = float(r0['Produktivitas (kg/ha)']) if pd.notna(r0.get('Produktivitas (kg/ha)')) else 0.0
+
             else:
-                kode_wilayah = info_row['Kode'].values[0] if 'Kode' in info_row.columns else None
-                lat = info_row['Lat'].values[0] if 'Lat' in info_row.columns else None
-                lon = info_row['Lon'].values[0] if 'Lon' in info_row.columns else None
-                
-                if pd.isna(lat) or pd.isna(lon):
-                    st.error(f"Koordinat (Lat/Lon) untuk {pilih_wilayah} kosong di sheet 'Info Wilayah'.")
+                st.markdown(f"""
+                <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-left: 3px solid #10B981; border-radius: 6px; padding: 10px 14px; margin-top: 8px; font-size: 0.84rem; color: #334155;">
+                    <span style="font-weight: 700; color: #047857;">Entri Baru</span> &mdash; 
+                    Belum ada baris data untuk <b>{pilih_wilayah} ({pilih_tahun})</b>. Menyimpan akan menambahkan rekaman baru.
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+        with st.form("form_input_data", border=True):
+            st.markdown("<div style='font-weight: 700; font-size: 1rem; color: #0F172A; margin-bottom: 4px;'>Parameter Komoditas Lada</div>", unsafe_allow_html=True)
+            st.caption("Masukkan angka sesuai laporan statistik pertanian (BDSP / BPS).")
+
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                input_luas = st.number_input("Luas Panen (ha)", min_value=0.0, value=default_luas, step=1.0, format="%.2f")
+            with col_b:
+                input_produksi = st.number_input("Produksi (ton)", min_value=0.0, value=default_prod, step=1.0, format="%.2f")
+            with col_c:
+                input_produktivitas = st.number_input("Produktivitas (kg/ha)", min_value=0.0, value=default_prodv, step=1.0, format="%.2f")
+
+            st.markdown("<hr style='margin: 16px 0; border-color: #E2E8F0;'>", unsafe_allow_html=True)
+            st.markdown("<div style='font-weight: 700; font-size: 1rem; color: #0F172A; margin-bottom: 4px;'>Mengambil Data Meterologi</div>", unsafe_allow_html=True)
+
+            tarik_iklim = st.checkbox(
+                "Tarik & perbarui parameter iklim dari Open-Meteo Archive API",
+                value=False,
+                help="Mengambil data suhu (min, max, rata-rata), kelembapan relatif, curah hujan, evapotranspirasi, dan kecepatan angin sesuai koordinat wilayah."
+            )
+
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+            submit_data = st.form_submit_button("Simpan Perubahan", type="primary", use_container_width=True)
+
+            if submit_data:
+                info_row = df_info[df_info['Nama Wilayah'] == pilih_wilayah]
+
+                if info_row.empty:
+                    pesan_err = f"Gagal menyimpan: Wilayah '{pilih_wilayah}' tidak terdaftar pada sheet 'Info Wilayah'."
+                    st.error(pesan_err)
+                    st.toast(pesan_err)
                 else:
-                    try:
-                        data_update_panel = {
-                            'Kode': kode_wilayah,
-                            'Nama Wilayah': pilih_wilayah,
-                            'Tahun': pilih_tahun,
-                            'Luas Panen (ha)': input_luas,
-                            'Produksi (ton)': input_produksi,
-                            'Produktivitas (kg/ha)': input_produktivitas,
-                            'Latitude': lat,
-                            'Longitude': lon
-                        }
-                        
-                        if tarik_iklim:
-                            with st.spinner(f"Menarik data iklim {pilih_wilayah} tahun {pilih_tahun} dari Open-Meteo..."):
-                                import datetime, requests
-                                today = datetime.date.today()
-                                end_date_str = f"{pilih_tahun}-12-31"
-                                if pilih_tahun >= today.year:
-                                    last_available_date = today - datetime.timedelta(days=5)
-                                    end_date_str = last_available_date.strftime("%Y-%m-%d")
-                                    
-                                start_date_str = f"{pilih_tahun}-01-01"
+                    kode_wilayah = info_row['Kode'].values[0] if 'Kode' in info_row.columns else None
+                    lat = info_row['Lat'].values[0] if 'Lat' in info_row.columns else None
+                    lon = info_row['Lon'].values[0] if 'Lon' in info_row.columns else None
 
-                                url = (
-                                    f"https://archive-api.open-meteo.com/v1/archive?"
-                                    f"latitude={lat}&longitude={lon}&start_date={start_date_str}&end_date={end_date_str}"
-                                    f"&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
-                                    f"precipitation_sum,rain_sum,et0_fao_evapotranspiration,wind_speed_10m_max,"
-                                    f"wind_speed_10m_mean&timezone=Asia%2FJakarta"
-                                )
-                                
-                                response = requests.get(url)
-                                data_cuaca = response.json()
-                                
-                                if "error" in data_cuaca:
-                                    st.error(f"Gagal menarik data API: {data_cuaca.get('reason')}")
-                                else:
-                                    daily = data_cuaca['daily']
-                                    
-                                    suhu_max = max((x for x in daily['temperature_2m_max'] if x is not None), default=0)
-                                    suhu_min = min((x for x in daily['temperature_2m_min'] if x is not None), default=0)
-                                    suhu_avg = sum(filter(None, daily['temperature_2m_mean'])) / len([x for x in daily['temperature_2m_mean'] if x is not None])
-                                    curah_hujan = sum(filter(None, daily['precipitation_sum']))
-                                    evapotranspirasi = sum(filter(None, daily['et0_fao_evapotranspiration']))
-                                    angin_max = max((x for x in daily['wind_speed_10m_max'] if x is not None), default=0)
-                                    angin_avg = sum(filter(None, daily['wind_speed_10m_mean'])) / len([x for x in daily['wind_speed_10m_mean'] if x is not None])
-                                    
-                                    data_update_panel.update({
-                                        'Suhu Maksimum (°C)': round(suhu_max, 2),
-                                        'Suhu Minimum (°C)': round(suhu_min, 2),
-                                        'Suhu Rata-rata (°C)': round(suhu_avg, 2),
-                                        'Curah Hujan Total (mm)': round(curah_hujan, 2),
-                                        'Evapotranspirasi Total (mm)': round(evapotranspirasi, 2),
-                                        'Kecepatan Angin Maksimum': round(angin_max, 2),
-                                        'Kecepatan Angin Rata-rata': round(angin_avg, 2),
-                                        'Kelembapan Rata-rata (%)': 80.0
-                                    })
-                        
-                        backup_path = FILE_DATASET.replace(".xlsx", "_backup.xlsx")
-                        shutil.copy2(FILE_DATASET, backup_path)
-
-                        if 'Nama Wilayah' in df_panel.columns and 'Tahun' in df_panel.columns:
-                            mask_panel = (df_panel['Nama Wilayah'] == pilih_wilayah) & (df_panel['Tahun'] == pilih_tahun)
-                        else:
-                            mask_panel = pd.Series([False] * len(df_panel))
-
-                        if mask_panel.any():
-                            idx = df_panel[mask_panel].index[0]
-                            for col, val in data_update_panel.items():
-                                df_panel.at[idx, col] = val
-                        else:
-                            df_panel = pd.concat([df_panel, pd.DataFrame([data_update_panel])], ignore_index=True)
-                        
-                        if 'Nama Wilayah' in df_cluster.columns and 'Tahun' in df_cluster.columns:
-                            mask_cluster = (df_cluster['Nama Wilayah'] == pilih_wilayah) & (df_cluster['Tahun'] == pilih_tahun)
-                        else:
-                            mask_cluster = pd.Series([False] * len(df_cluster))
-                            
-                        if not mask_cluster.any():
-                            data_update_cluster = {
+                    if pd.isna(lat) or pd.isna(lon):
+                        pesan_err = f"Gagal menyimpan: Koordinat geografis (Lat/Lon) untuk {pilih_wilayah} belum tersedia di 'Info Wilayah'."
+                        st.error(pesan_err)
+                        st.toast(pesan_err)
+                    else:
+                        try:
+                            data_update_panel = {
                                 'Kode': kode_wilayah,
                                 'Nama Wilayah': pilih_wilayah,
-                                'Tahun': pilih_tahun
+                                'Tahun': int(pilih_tahun),
+                                'Luas Panen (ha)': input_luas,
+                                'Produksi (ton)': input_produksi,
+                                'Produktivitas (kg/ha)': input_produktivitas,
                             }
-                            df_cluster = pd.concat([df_cluster, pd.DataFrame([data_update_cluster])], ignore_index=True)
+                            if 'Latitude' in df_panel.columns:
+                                data_update_panel['Latitude'] = lat
+                            if 'Longitude' in df_panel.columns:
+                                data_update_panel['Longitude'] = lon
 
-                        sort_cols_panel = [col for col in ['Kode', 'Tahun'] if col in df_panel.columns]
-                        if sort_cols_panel:
-                            df_panel = df_panel.sort_values(by=sort_cols_panel).reset_index(drop=True)
-                            
-                        sort_cols_cluster = [col for col in ['Kode', 'Tahun'] if col in df_cluster.columns]
-                        if sort_cols_cluster:
-                            df_cluster = df_cluster.sort_values(by=sort_cols_cluster).reset_index(drop=True)
-                        
-                        with pd.ExcelWriter(FILE_DATASET, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
-                            df_panel.to_excel(writer, sheet_name='Data Panel', index=False)
-                            df_cluster.to_excel(writer, sheet_name='Cluster', index=False)
-                        
-                        st.success(f"✅ Data {pilih_wilayah} tahun {pilih_tahun} berurut rapi dan berhasil disimpan!")
-                        
-                        import time
-                        st.cache_data.clear()
-                        time.sleep(1.5)
-                        st.rerun()
+                            iklim_dict = {}
+                            if tarik_iklim:
+                                with st.spinner(f"Mengunduh data meteorologi {pilih_wilayah} ({pilih_tahun})..."):
+                                    today = datetime.date.today()
+                                    end_date_str = f"{pilih_tahun}-12-31"
+                                    if pilih_tahun >= today.year:
+                                        last_available_date = today - datetime.timedelta(days=5)
+                                        end_date_str = last_available_date.strftime("%Y-%m-%d")
 
-                    except Exception as e:
-                        st.error(f"Terjadi kesalahan saat memproses/menyimpan data: {str(e)}")
+                                    start_date_str = f"{pilih_tahun}-01-01"
+
+                                    url = (
+                                        f"https://archive-api.open-meteo.com/v1/archive?"
+                                        f"latitude={lat}&longitude={lon}&start_date={start_date_str}&end_date={end_date_str}"
+                                        f"&daily=temperature_2m_max,temperature_2m_min,temperature_2m_mean,"
+                                        f"relative_humidity_2m_mean,precipitation_sum,et0_fao_evapotranspiration,"
+                                        f"wind_speed_10m_max,wind_speed_10m_mean&timezone=Asia%2FJakarta"
+                                    )
+
+                                    response = requests.get(url, timeout=15)
+                                    data_cuaca = response.json()
+
+                                    if "error" in data_cuaca:
+                                        pesan_api = f"Gagal mengambil data API: {data_cuaca.get('reason')}"
+                                        st.error(pesan_api)
+                                        st.toast(pesan_api)
+                                        st.stop()
+                                    else:
+                                        daily = data_cuaca['daily']
+                                        suhu_max = max((x for x in daily['temperature_2m_max'] if x is not None), default=0)
+                                        suhu_min = min((x for x in daily['temperature_2m_min'] if x is not None), default=0)
+
+                                        t_mean_valid = [x for x in daily['temperature_2m_mean'] if x is not None]
+                                        suhu_avg = sum(t_mean_valid) / len(t_mean_valid) if t_mean_valid else 0
+
+                                        rh_valid = [x for x in daily.get('relative_humidity_2m_mean', []) if x is not None]
+                                        kelembapan_avg = sum(rh_valid) / len(rh_valid) if rh_valid else 0
+
+                                        curah_hujan = sum(filter(None, daily['precipitation_sum']))
+                                        evapotranspirasi = sum(filter(None, daily['et0_fao_evapotranspiration']))
+                                        angin_max = max((x for x in daily['wind_speed_10m_max'] if x is not None), default=0)
+
+                                        w_mean_valid = [x for x in daily['wind_speed_10m_mean'] if x is not None]
+                                        angin_avg = sum(w_mean_valid) / len(w_mean_valid) if w_mean_valid else 0
+
+                                        iklim_dict = {
+                                            'Suhu Maksimum (°C)': round(suhu_max, 2),
+                                            'Suhu Minimum (°C)': round(suhu_min, 2),
+                                            'Suhu Rata-rata (°C)': round(suhu_avg, 2),
+                                            'Kelembapan Rata-rata (%)': round(kelembapan_avg, 2),
+                                            'Curah Hujan Total (mm)': round(curah_hujan, 2),
+                                            'Evapotranspirasi Total (mm)': round(evapotranspirasi, 2),
+                                            'Kecepatan Angin Maksimum': round(angin_max, 2),
+                                            'Kecepatan Angin Rata-rata': round(angin_avg, 2),
+                                        }
+                                        data_update_panel.update(iklim_dict)
+
+                            mask_panel = (df_panel['Nama Wilayah'] == pilih_wilayah) & (df_panel['Tahun'] == pilih_tahun)
+                            if mask_panel.any():
+                                idx = df_panel[mask_panel].index[0]
+                                for col, val in data_update_panel.items():
+                                    if col in df_panel.columns:
+                                        df_panel.at[idx, col] = val
+                            else:
+                                new_row_panel = {col: pd.NA for col in df_panel.columns}
+                                for col, val in data_update_panel.items():
+                                    if col in df_panel.columns:
+                                        new_row_panel[col] = val
+                                df_panel = pd.concat([df_panel, pd.DataFrame([new_row_panel])], ignore_index=True)
+
+                            mask_cluster = (df_cluster['Nama Wilayah'] == pilih_wilayah)
+                            if not mask_cluster.any():
+                                new_row_cl = {col: 0.0 for col in df_cluster.columns}
+                                if 'Kode' in df_cluster.columns:
+                                    new_row_cl['Kode'] = kode_wilayah
+                                new_row_cl['Nama Wilayah'] = pilih_wilayah
+                                df_cluster = pd.concat([df_cluster, pd.DataFrame([new_row_cl])], ignore_index=True)
+                                mask_cluster = (df_cluster['Nama Wilayah'] == pilih_wilayah)
+
+                            idx_cl = df_cluster[mask_cluster].index[0]
+
+                            # 1. Isi komponen pertanian & jadikan nilai default baris lain = 0 (bukan None)
+                            agri_wide_updates = {
+                                f"Luas Panen (ha) {pilih_tahun}": input_luas,
+                                f"Produksi (ton) {pilih_tahun}": input_produksi,
+                                f"Produktivitas (kg/ha) {pilih_tahun}": input_produktivitas,
+                            }
+                            for col_wide, val_wide in agri_wide_updates.items():
+                                if col_wide not in df_cluster.columns:
+                                    df_cluster[col_wide] = 0.0
+                                else:
+                                    df_cluster[col_wide] = df_cluster[col_wide].fillna(0.0)
+                                df_cluster.at[idx_cl, col_wide] = val_wide
+
+                            # 2. Isi komponen iklim jika ditarik & jadikan nilai default baris lain = 0 (bukan None)
+                            for k_iklim, v_iklim in iklim_dict.items():
+                                col_iklim_wide = f"{k_iklim} {pilih_tahun}"
+                                if col_iklim_wide not in df_cluster.columns:
+                                    df_cluster[col_iklim_wide] = 0.0
+                                else:
+                                    df_cluster[col_iklim_wide] = df_cluster[col_iklim_wide].fillna(0.0)
+                                df_cluster.at[idx_cl, col_iklim_wide] = v_iklim
+
+                            # Pastikan tidak ada sisa None/NaN di seluruh sel sheet Cluster
+                            df_cluster = df_cluster.fillna(0.0)
+
+                            # 3. Urutkan kolom Cluster per variabel & tahun agar 2026 sejajar di samping 2025
+                            id_cols, var_order, var_groups = [], [], {}
+                            for col in df_cluster.columns:
+                                m = re.match(r'^(.*?)\s+((?:19|20)\d{2})\s*$', str(col))
+                                if m:
+                                    base_var, thn_col = m.group(1).strip(), int(m.group(2))
+                                    if base_var not in var_groups:
+                                        var_order.append(base_var)
+                                        var_groups[base_var] = []
+                                    var_groups[base_var].append((thn_col, col))
+                                else:
+                                    id_cols.append(col)
+
+                            ordered_cluster_cols = id_cols + [
+                                c for base_var in var_order
+                                for _, c in sorted(var_groups[base_var], key=lambda x: x[0])
+                            ]
+                            df_cluster = df_cluster[ordered_cluster_cols]
+
+                            sort_cols_panel = [col for col in ['Kode', 'Tahun'] if col in df_panel.columns]
+                            if sort_cols_panel:
+                                df_panel = df_panel.sort_values(by=sort_cols_panel).reset_index(drop=True)
+
+                            with pd.ExcelWriter(FILE_DATASET, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+                                df_panel.to_excel(writer, sheet_name='Data Panel', index=False)
+                                df_cluster.to_excel(writer, sheet_name='Cluster', index=False)
+
+                            pesan_sukses = f"Berhasil! Data {pilih_wilayah} tahun {pilih_tahun} telah tersimpan ke dalam dataset."
+                            st.session_state["tab4_notif"] = ("success", pesan_sukses)
+                            st.success(pesan_sukses)
+                            st.toast(pesan_sukses)
+                            st.cache_data.clear()
+                            time.sleep(1.0)
+                            st.rerun()
+
+                        except Exception as e:
+                            pesan_gagal = f"Gagal menyimpan perubahan: {str(e)}"
+                            st.error(pesan_gagal)
+                            st.toast(pesan_gagal)
+
+    with col_side:
+        with st.container(border=True):
+            st.markdown("<div style='font-weight: 700; font-size: 1rem; color: #0F172A; margin-bottom: 4px;'>Mengembalikan Data menjadi dataset awal</div>", unsafe_allow_html=True)
+            st.caption("Unggah file cadangan (.xlsx) Anda untuk menimpa seluruh dataset aktif saat ini.")
+
+            uploaded_backup = st.file_uploader(
+                "Pilih file Excel cadangan (.xlsx)",
+                type=["xlsx"],
+                label_visibility="collapsed"
+            )
+
+            if uploaded_backup is not None:
+                if st.button("Timpa Dataset Sekarang", type="secondary", use_container_width=True):
+                    try:
+                        xls_check = pd.ExcelFile(uploaded_backup)
+                        required_sheets = {'Data Panel', 'Cluster', 'Info Wilayah'}
+                        if not required_sheets.issubset(set(xls_check.sheet_names)):
+                            missing = required_sheets - set(xls_check.sheet_names)
+                            pesan_tolak = f"File ditolak. Sheet wajib tidak ditemukan: {', '.join(missing)}"
+                            st.error(pesan_tolak)
+                            st.toast(pesan_tolak)
+                        else:
+                            with open(FILE_DATASET, "wb") as f:
+                                f.write(uploaded_backup.getvalue())
+                            pesan_reset = "Berhasil! Dataset utama telah ditimpa dan dikembalikan ke dataset cadangan."
+                            st.session_state["tab4_notif"] = ("success", pesan_reset)
+                            st.success(pesan_reset)
+                            st.toast(pesan_reset)
+                            st.cache_data.clear()
+                            time.sleep(1.0)
+                            st.rerun()
+                    except Exception as err:
+                        pesan_rusak = f"File tidak valid atau rusak: {err}"
+                        st.error(pesan_rusak)
+                        st.toast(pesan_rusak)
+
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
